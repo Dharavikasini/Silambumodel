@@ -40,6 +40,14 @@ ACTIVITY_SCALER_PATH = PROJECT_ROOT / "models" / "scaler.pkl"
 BEHAVIOR_MODEL_PATH = PROJECT_ROOT / "models" / "behavior_model.keras"
 BEHAVIOR_SCALER_PATH = PROJECT_ROOT / "models" / "behavior_scaler.pkl"
 
+# Optional behavior-label artifacts. The pipeline checks these in order.
+BEHAVIOR_LABEL_MAPPING_PATHS = [
+    PROJECT_ROOT / "data" / "processed" / "behavior_label_mapping.json",
+    PROJECT_ROOT / "models" / "behavior_label_mapping.json",
+    PROJECT_ROOT / "models" / "behavior_labels.json",
+    PROJECT_ROOT / "models" / "behavior_label_encoder.pkl",
+]
+
 ANOMALY_MODEL_PATH = PROJECT_ROOT / "models" / "anomaly_detector.pkl"
 ANOMALY_SCALER_PATH = PROJECT_ROOT / "models" / "anomaly_scaler.pkl"
 ANOMALY_METADATA_PATH = PROJECT_ROOT / "models" / "anomaly_metadata.json"
@@ -410,6 +418,96 @@ def predict_activity(window: pd.DataFrame) -> dict[str, object]:
     }
 
 
+def load_behavior_label_mapping() -> dict[int, str] | None:
+    """
+    Load a saved behavior class -> human-readable label mapping when available.
+
+    Supported formats:
+      - JSON object: {"0": "normal", "1": "agitated"}
+      - JSON list: ["normal", "agitated"]
+      - Pickled sklearn-style LabelEncoder with classes_
+      - Pickled dict with integer/string keys
+    """
+    for path in BEHAVIOR_LABEL_MAPPING_PATHS:
+        if not path.exists():
+            continue
+
+        try:
+            if path.suffix.lower() == ".json":
+                with path.open("r", encoding="utf-8") as file:
+                    raw = json.load(file)
+
+                if isinstance(raw, list):
+                    return {index: str(label) for index, label in enumerate(raw)}
+
+                if isinstance(raw, dict):
+                    mapping: dict[int, str] = {}
+
+                    # The current behavior training code saves the mapping as:
+                    # {"resting": 0, "walking": 1, ...}
+                    # Convert it to the inference form: {0: "resting", ...}.
+                    if all(
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        for value in raw.values()
+                    ):
+                        for label, class_id in raw.items():
+                            mapping[int(class_id)] = str(label)
+                        return mapping
+
+                    # Also support the opposite format:
+                    # {"0": "resting", "1": "walking", ...}
+                    for key, value in raw.items():
+                        try:
+                            mapping[int(key)] = str(value)
+                        except (TypeError, ValueError):
+                            continue
+
+                    if mapping:
+                        return mapping
+
+            else:
+                artifact = load_pickle(path)
+
+                # sklearn LabelEncoder-like artifact
+                classes = getattr(artifact, "classes_", None)
+                if classes is not None:
+                    return {
+                        index: str(label)
+                        for index, label in enumerate(classes)
+                    }
+
+                # Plain dictionary
+                if isinstance(artifact, dict):
+                    mapping = {}
+
+                    if all(
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        for value in artifact.values()
+                    ):
+                        for label, class_id in artifact.items():
+                            mapping[int(class_id)] = str(label)
+                        return mapping
+
+                    for key, value in artifact.items():
+                        try:
+                            mapping[int(key)] = str(value)
+                        except (TypeError, ValueError):
+                            continue
+
+                    if mapping:
+                        return mapping
+
+        except Exception as exc:
+            print(
+                f"Warning: could not load behavior label mapping "
+                f"from {path.name}: {exc}"
+            )
+
+    return None
+
+
 def predict_behavior(window: pd.DataFrame) -> dict[str, object]:
     """Run the existing Behavior LSTM model."""
     if not BEHAVIOR_MODEL_PATH.exists():
@@ -443,16 +541,25 @@ def predict_behavior(window: pd.DataFrame) -> dict[str, object]:
 
     class_index = int(np.argmax(probabilities))
 
-    # Behavior class labels are not known from the artifact names alone.
-    # If a behavior label encoder exists in the future, it can be added here.
-    class_name = f"class_{class_index}"
+    # Prefer a saved human-readable mapping. If none exists, retain the
+    # previous safe fallback: class_<numeric_index>.
+    label_mapping = load_behavior_label_mapping()
+
+    if label_mapping is not None and class_index in label_mapping:
+        behavior_label = label_mapping[class_index]
+        label_source = "saved_mapping"
+    else:
+        behavior_label = f"class_{class_index}"
+        label_source = "fallback"
 
     return {
         "class_index": class_index,
-        "class_name": class_name,
+        "class_name": behavior_label,
+        "behavior_label": behavior_label,
         "confidence": float(probabilities[class_index]),
         "probabilities": probabilities.tolist(),
         "feature_names": feature_names,
+        "label_source": label_source,
     }
 
 
@@ -765,7 +872,8 @@ def run_pipeline(
     print("\n[2/4] Behavior Learning")
     behavior = predict_behavior(window)
     print(
-        f"Behavior: {behavior['class_name']} "
+        f"Behavior: class_{behavior['class_index']} -> "
+        f"{behavior['behavior_label']} "
         f"({behavior['confidence']:.4f})"
     )
 
@@ -802,6 +910,160 @@ def run_pipeline(
     }
 
 
+
+def get_runtime_test_input(
+    df: pd.DataFrame,
+    window_length: int = WINDOW_LENGTH,
+) -> tuple[pd.DataFrame, int, str]:
+    """
+    Ask the user at runtime which scenario and starting window index
+    should be used for inference.
+
+    The existing inference/model functions are not changed.
+    The selected scenario is filtered first, then the existing
+    start-index/window logic operates on that filtered dataframe.
+    """
+
+    if "scenario" not in df.columns:
+        raise ValueError(
+            "Runtime scenario selection requires a 'scenario' column "
+            "in the input CSV."
+        )
+
+    scenarios = [
+        str(value)
+        for value in df["scenario"].dropna().unique().tolist()
+    ]
+
+    if not scenarios:
+        raise ValueError("No scenarios were found in the input CSV.")
+
+    # Keep the familiar Silambu scenario order when those names exist.
+    preferred_order = [
+        "normal_rest",
+        "normal_walking",
+        "normal_running",
+        "sudden_movement",
+        "possible_struggle",
+        "unusual_location",
+        "tampering",
+        "emergency_sos",
+    ]
+
+    ordered_scenarios = [
+        scenario for scenario in preferred_order
+        if scenario in scenarios
+    ]
+
+    # Preserve any additional scenarios that may exist in the dataset.
+    ordered_scenarios.extend(
+        scenario
+        for scenario in scenarios
+        if scenario not in ordered_scenarios
+    )
+
+    print("\n" + "=" * 60)
+    print("SILAMBU RUNTIME TEST INPUT")
+    print("=" * 60)
+
+    print("\nAvailable scenarios:")
+    for index, scenario in enumerate(ordered_scenarios, start=1):
+        count = int((df["scenario"] == scenario).sum())
+        print(f"{index}. {scenario} ({count} readings)")
+
+    # --------------------------------------------------------
+    # Scenario selection
+    # --------------------------------------------------------
+    while True:
+        try:
+            scenario_choice = int(
+                input("\nEnter scenario number: ").strip()
+            )
+
+            if 1 <= scenario_choice <= len(ordered_scenarios):
+                selected_scenario = ordered_scenarios[
+                    scenario_choice - 1
+                ]
+                break
+
+            print(
+                f"Please enter a number from 1 to "
+                f"{len(ordered_scenarios)}."
+            )
+
+        except ValueError:
+            print("Please enter a valid number.")
+
+    # Filter the raw dataset to the selected scenario.
+    scenario_df = df[
+        df["scenario"] == selected_scenario
+    ].reset_index(drop=True)
+
+    if len(scenario_df) < window_length:
+        raise ValueError(
+            f"Scenario '{selected_scenario}' contains "
+            f"{len(scenario_df)} readings, but "
+            f"{window_length} readings are required."
+        )
+
+    max_start_index = len(scenario_df) - window_length
+
+    print()
+    print(f"Selected scenario : {selected_scenario}")
+    print(f"Available readings: {len(scenario_df)}")
+    print(f"Window size       : {window_length}")
+    print(
+        f"Valid start index : 0 to {max_start_index}"
+    )
+
+    # --------------------------------------------------------
+    # Starting window selection
+    # --------------------------------------------------------
+    while True:
+        try:
+            start_index = int(
+                input(
+                    f"\nEnter starting window index "
+                    f"(0-{max_start_index}): "
+                ).strip()
+            )
+
+            if 0 <= start_index <= max_start_index:
+                break
+
+            print(
+                f"Please enter an index from 0 to "
+                f"{max_start_index}."
+            )
+
+        except ValueError:
+            print("Please enter a valid integer.")
+
+    end_index = start_index + window_length
+
+    window = scenario_df.iloc[
+        start_index:end_index
+    ].copy()
+
+    print()
+    print("-" * 60)
+    print("SELECTED TEST WINDOW")
+    print("-" * 60)
+    print(f"Scenario : {selected_scenario}")
+    print(
+        f"Readings : {start_index} to {end_index - 1}"
+    )
+
+    if "timestamp" in window.columns:
+        print(
+            f"Time     : {window['timestamp'].iloc[0]} "
+            f"-> {window['timestamp'].iloc[-1]}"
+        )
+
+    print("-" * 60)
+
+    return window, start_index, selected_scenario
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run the complete Silambu AI inference pipeline."
@@ -829,34 +1091,33 @@ def main() -> None:
 
     df = pd.read_csv(input_path)
 
-    if args.start < 0:
-        raise ValueError("--start must be >= 0.")
-
-    end = args.start + WINDOW_LENGTH
-
-    if end > len(df):
-        raise ValueError(
-            f"Need {WINDOW_LENGTH} readings starting at {args.start},"
-            f"but dataset has only {len(df)} rows."
-        )
-
-    window = df.iloc[
-        args.start:end
-    ].copy()
+    # Runtime test selection:
+    # choose the scenario and starting window index without
+    # editing this file between tests.
+    window, start_index, selected_scenario = get_runtime_test_input(
+        df,
+        WINDOW_LENGTH,
+    )
 
     results = run_pipeline(
         window,
-        args.start,
+        start_index,
     )
 
     print("\n" + "=" * 60)
     print("FINAL SILAMBU DECISION")
     print("=" * 60)
+    print(f"Scenario : {selected_scenario}")
+    print(
+        f"Window   : {start_index} to "
+        f"{start_index + WINDOW_LENGTH - 1}"
+    )
     print(
         f"Activity : {results['activity']['class_name']}"
     )
     print(
-        f"Behavior : {results['behavior']['class_name']}"
+        f"Behavior : class_{results['behavior']['class_index']} "
+        f"-> {results['behavior']['behavior_label']}"
     )
     print(
         f"Anomaly  : {results['anomaly']['is_anomaly']} "
