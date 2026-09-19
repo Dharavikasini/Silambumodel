@@ -1,0 +1,82 @@
+{
+  "synthetic_data_note": "Evaluation is based on synthetic data.",
+  "window_length": 30,
+  "training_windows": 27971,
+  "normal_test_windows": 6971,
+  "anomaly_test_windows": 14971,
+  "selected_contamination": 0.03,
+  "normal_detection_rate": 0.947066418017501,
+  "anomaly_detection_rate": 0.8997394963596286,
+  "balanced_detection_score": 0.9234029571885648,
+  "overall_accuracy": 0.9147753167441437,
+  "confusion_matrix": [
+    [
+      6602,
+      369
+    ],
+    [
+      1501,
+      13470
+    ]
+  ],
+  "classification_report": "              precision    recall  f1-score   support\n\n      normal       0.81      0.95      0.88      6971\n     anomaly       0.97      0.90      0.94     14971\n\n    accuracy                           0.91     21942\n   macro avg       0.89      0.92      0.91     21942\nweighted avg       0.92      0.91      0.92     21942\n",
+  "direct_tamper_alert_rate": 0.1892993120032062,
+  "direct_sos_alert_rate": 0.19123639035468573,
+  "per_scenario_detection_rates": {
+    "emergency_sos": {
+      "behavioral_anomaly_detection_rate": 1.0,
+      "direct_tamper_alert_detection_rate": 0.0,
+      "direct_sos_alert_detection_rate": 1.0
+    },
+    "possible_struggle": {
+      "behavioral_anomaly_detection_rate": 0.9852181400688863,
+      "direct_tamper_alert_detection_rate": 0.0,
+      "direct_sos_alert_detection_rate": 0.0
+    },
+    "sudden_movement": {
+      "behavioral_anomaly_detection_rate": 0.89577019370141,
+      "direct_tamper_alert_detection_rate": 0.0,
+      "direct_sos_alert_detection_rate": 0.0
+    },
+    "tampering": {
+      "behavioral_anomaly_detection_rate": 0.9992942836979535,
+      "direct_tamper_alert_detection_rate": 1.0,
+      "direct_sos_alert_detection_rate": 0.0
+    },
+    "unusual_location": {
+      "behavioral_anomaly_detection_rate": 0.8046610923323252,
+      "direct_tamper_alert_detection_rate": 0.0,
+      "direct_sos_alert_detection_rate": 0.0
+    }
+  },
+  "candidate_contamination_results": [
+    {
+      "contamination": 0.03,
+      "normal_detection_rate": 0.947066418017501,
+      "anomaly_detection_rate": 0.8997394963596286,
+      "balanced_detection_score": 0.9234029571885648,
+      "overall_accuracy": 0.9147753167441437
+    },
+    {
+      "contamination": 0.05,
+      "normal_detection_rate": 0.9053220484865873,
+      "anomaly_detection_rate": 0.9304655667624073,
+      "balanced_detection_score": 0.9178938076244973,
+      "overall_accuracy": 0.9224774405250205
+    },
+    {
+      "contamination": 0.08,
+      "normal_detection_rate": 0.8320183617845359,
+      "anomaly_detection_rate": 0.9670028722196246,
+      "balanced_detection_score": 0.8995106170020802,
+      "overall_accuracy": 0.9241181296144381
+    },
+    {
+      "contamination": 0.1,
+      "normal_detection_rate": 0.7806627456605939,
+      "anomaly_detection_rate": 0.9885111215015697,
+      "balanced_detection_score": 0.8845869335810819,
+      "overall_accuracy": 0.9224774405250205
+    }
+  ]
+}

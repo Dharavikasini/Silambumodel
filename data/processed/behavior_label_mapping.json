@@ -1,0 +1,10 @@
+{
+  "emergency": 7,
+  "resting": 0,
+  "running": 2,
+  "struggle": 4,
+  "sudden_movement": 3,
+  "tampering": 6,
+  "travel": 5,
+  "walking": 1
+}
