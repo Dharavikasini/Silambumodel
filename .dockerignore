@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.env
+
+# Training-generated files that are not required for inference
+data/processed/*.npy
+data/processed/*.npz
+
+# IDE files
+.vscode/
+.idea/
+
+# Python cache
+.pytest_cache/
+.mypy_cache/
