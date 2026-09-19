@@ -1,0 +1,29 @@
+{
+  "risk_class_mapping": {
+    "LOW": 0,
+    "MEDIUM": 1,
+    "HIGH": 2,
+    "CRITICAL": 3
+  },
+  "feature_names": [
+    "heart_rate",
+    "spo2",
+    "acceleration_magnitude",
+    "gyroscope_magnitude",
+    "speed",
+    "heart_rate_change",
+    "speed_change",
+    "distance_from_normal_baseline",
+    "maximum_distance_from_normal_baseline",
+    "activity_encoded",
+    "isolation_forest_anomaly_score",
+    "tamper",
+    "sos",
+    "hour_of_day"
+  ],
+  "baseline_latitude": 12.950098200500001,
+  "baseline_longitude": 77.5799638605357,
+  "split_method": "stratified_train_test_split",
+  "test_size": 0.2,
+  "random_state": 42
+}

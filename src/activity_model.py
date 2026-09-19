@@ -1,7 +1,7 @@
 """Activity modeling for the Silambu child safety wearable prototype.
 
-This module prepares the sliding-window sensor data and also trains a
-DeepConvLSTM activity recognition model from the prepared arrays.
+Prepares sliding-window sensor data and trains a DeepConvLSTM activity
+recognition model using exactly 11 activity features.
 """
 
 from __future__ import annotations
@@ -17,66 +17,31 @@ try:
     import tensorflow as tf
     from tensorflow import keras
     from tensorflow.keras import layers
-except ImportError:  # pragma: no cover - TensorFlow is required at runtime.
+except ImportError:
     tf = None
     keras = None
     layers = None
 
-try:
-    from sklearn.metrics import classification_report, confusion_matrix
-except ImportError:  # pragma: no cover - metrics fallback for minimal environments
-    classification_report = None
-    confusion_matrix = None
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
 
-try:
-    from sklearn.model_selection import train_test_split
-except ImportError:  # pragma: no cover - fallback for minimal environments
-    def train_test_split(X, y, test_size=0.2, random_state=None, stratify=None):
-        rng = np.random.RandomState(random_state)
-        indices = np.arange(len(X))
-        rng.shuffle(indices)
-        split_index = int(len(X) * (1 - test_size))
-        train_idx = indices[:split_index]
-        test_idx = indices[split_index:]
-        return X[train_idx], X[test_idx], y[train_idx], y[test_idx]
 
-try:
-    from sklearn.preprocessing import LabelEncoder
-except ImportError:  # pragma: no cover - fallback for minimal environments
-    class LabelEncoder:
-        """Minimal fallback label encoder used when scikit-learn is unavailable."""
-
-        def __init__(self) -> None:
-            self.classes_: np.ndarray | None = None
-            self._mapping: dict[object, int] | None = None
-
-        def fit(self, values):
-            unique_values = np.unique(np.asarray(list(values)))
-            self.classes_ = unique_values
-            self._mapping = {value: index for index, value in enumerate(unique_values)}
-            return self
-
-        def transform(self, values):
-            if self.classes_ is None or self._mapping is None:
-                raise ValueError("LabelEncoder has not been fitted yet.")
-            return np.asarray([self._mapping.get(value, -1) for value in values], dtype=np.int64)
-
-        def fit_transform(self, values):
-            self.fit(values)
-            return self.transform(values)
-
-        def inverse_transform(self, values):
-            if self.classes_ is None:
-                raise ValueError("LabelEncoder has not been fitted yet.")
-            values = np.asarray(values)
-            return np.asarray([self.classes_[int(v)] for v in values])
-
+# ---------------------------------------------------------------------
+# Paths / configuration
+# ---------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 PROCESSED_DATA_PATH = PROJECT_ROOT / "data" / "processed" / "silambu_processed.csv"
 OUTPUT_DIR = PROJECT_ROOT / "data" / "processed"
 MODEL_DIR = PROJECT_ROOT / "models"
+
 WINDOW_SIZE = 30
+
+# IMPORTANT:
+# The Activity model now uses exactly the same 11-feature contract
+# represented by models/scaler.pkl.
 FEATURE_COLUMNS = [
     "heart_rate",
     "spo2",
@@ -87,22 +52,75 @@ FEATURE_COLUMNS = [
     "gyro_y",
     "gyro_z",
     "speed",
+    "acceleration_magnitude",
+    "gyroscope_magnitude",
 ]
-TARGET_COLUMN = "activity"
 
+TARGET_COLUMN = "activity"
+NUM_FEATURES = len(FEATURE_COLUMNS)
+
+
+# ---------------------------------------------------------------------
+# Data loading / validation
+# ---------------------------------------------------------------------
 
 def load_processed_dataset(file_path: Path) -> pd.DataFrame:
-    """Load the processed CSV file generated during preprocessing."""
-    return pd.read_csv(file_path)
+    """Load the processed sensor dataset."""
+    if not file_path.exists():
+        raise FileNotFoundError(f"Processed dataset not found: {file_path}")
+
+    df = pd.read_csv(file_path)
+
+    # Create derived features if preprocessing did not already create them.
+    if "acceleration_magnitude" not in df.columns:
+        df["acceleration_magnitude"] = np.sqrt(
+            df["accel_x"] ** 2
+            + df["accel_y"] ** 2
+            + df["accel_z"] ** 2
+        )
+
+    if "gyroscope_magnitude" not in df.columns:
+        df["gyroscope_magnitude"] = np.sqrt(
+            df["gyro_x"] ** 2
+            + df["gyro_y"] ** 2
+            + df["gyro_z"] ** 2
+        )
+
+    return df
 
 
 def validate_columns(df: pd.DataFrame) -> None:
-    """Ensure the required columns for sequence preparation exist."""
+    """Ensure all 11 Activity features and the target exist."""
     required_columns = FEATURE_COLUMNS + [TARGET_COLUMN]
     missing = [column for column in required_columns if column not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns for activity preparation: {missing}")
 
+    if missing:
+        raise ValueError(
+            "Missing required Activity columns: "
+            f"{missing}"
+        )
+
+
+def validate_feature_contract(X: np.ndarray) -> None:
+    """Ensure the prepared tensor matches the Activity model contract."""
+    expected_shape = (WINDOW_SIZE, NUM_FEATURES)
+
+    if X.ndim != 3:
+        raise ValueError(
+            f"Activity input must be 3-dimensional, got shape {X.shape}"
+        )
+
+    if X.shape[1:] != expected_shape:
+        raise ValueError(
+            f"Activity feature contract mismatch. "
+            f"Expected each window to have shape {expected_shape}, "
+            f"but got {X.shape[1:]}"
+        )
+
+
+# ---------------------------------------------------------------------
+# Sliding-window preparation
+# ---------------------------------------------------------------------
 
 def create_time_series_windows(
     df: pd.DataFrame,
@@ -124,111 +142,129 @@ def create_time_series_windows(
     targets = []
 
     for start_index in range(len(df) - window_size + 1):
-        window = feature_matrix[start_index : start_index + window_size]
-        label = activity_values[start_index + window_size - 1]
+        end_index = start_index + window_size
+
+        window = feature_matrix[start_index:end_index]
+
+        # The activity label of the last reading represents the window.
+        label = activity_values[end_index - 1]
+
         sequences.append(window)
         targets.append(label)
 
-    return np.asarray(sequences, dtype=np.float32), np.asarray(targets)
+    X = np.asarray(sequences, dtype=np.float32)
+    y = np.asarray(targets)
+
+    validate_feature_contract(X)
+
+    return X, y
 
 
-def encode_activity_labels(y: np.ndarray) -> tuple[np.ndarray, LabelEncoder]:
-    """Encode activity labels into integer classes and return the fitted encoder."""
+def encode_activity_labels(
+    y: np.ndarray,
+) -> tuple[np.ndarray, LabelEncoder]:
+    """Encode activity labels into integer class IDs."""
     encoder = LabelEncoder()
     encoded = encoder.fit_transform(y)
+
     return encoded.astype(np.int64), encoder
 
 
-def split_sequences(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Split the prepared sequences into 80/20 train/test partitions with stratification."""
-    if len(np.unique(y)) > 1:
+def split_sequences(
+    X: np.ndarray,
+    y: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Create a stratified 80/20 train/test split."""
+    if len(np.unique(y)) < 2:
         return train_test_split(
             X,
             y,
             test_size=0.2,
             random_state=42,
-            stratify=y,
         )
 
-    return train_test_split(X, y, test_size=0.2, random_state=42)
+    return train_test_split(
+        X,
+        y,
+        test_size=0.2,
+        random_state=42,
+        stratify=y,
+    )
 
+
+# ---------------------------------------------------------------------
+# Saving prepared arrays / encoder
+# ---------------------------------------------------------------------
 
 def save_numpy_array(array: np.ndarray, file_path: Path) -> None:
-    """Save a NumPy array to disk."""
+    """Save a NumPy array."""
     file_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(file_path, array)
 
 
-def save_label_encoder(encoder: LabelEncoder, file_path: Path) -> None:
-    """Persist the trained activity label encoder to disk."""
+def save_label_encoder(
+    encoder: LabelEncoder,
+    file_path: Path,
+) -> None:
+    """Save the Activity label encoder."""
     file_path.parent.mkdir(parents=True, exist_ok=True)
+
     with file_path.open("wb") as encoder_file:
         pickle.dump(encoder, encoder_file)
 
 
-def print_activity_summary(
-    X: np.ndarray,
-    y: np.ndarray,
-    X_train: np.ndarray,
-    X_test: np.ndarray,
-    y_train: np.ndarray,
-    y_test: np.ndarray,
-    label_encoder: LabelEncoder,
-) -> None:
-    """Print a concise summary of the prepared activity recognition dataset."""
-    class_distribution = pd.Series(y).value_counts().sort_index()
-    print("Activity preparation summary")
-    print("=" * 80)
-    print(f"Number of sequences: {len(X)}")
-    print(f"Number of features: {X.shape[2]}")
-    print(f"Sequence length: {X.shape[1]}")
-    print(f"X_train shape: {X_train.shape}")
-    print(f"X_test shape: {X_test.shape}")
-    print(f"y_train shape: {y_train.shape}")
-    print(f"y_test shape: {y_test.shape}")
-    print(f"Activity classes: {label_encoder.classes_}")
-    print("\nClass distribution:")
-    print(class_distribution)
+# ---------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------
 
-
-def load_data() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Load the prepared training and test arrays for model training."""
-    X_train = np.load(OUTPUT_DIR / "X_train.npy")
-    X_test = np.load(OUTPUT_DIR / "X_test.npy")
-    y_train = np.load(OUTPUT_DIR / "y_train.npy")
-    y_test = np.load(OUTPUT_DIR / "y_test.npy")
-
-    X_train = X_train.astype(np.float32)
-    X_test = X_test.astype(np.float32)
-    y_train = y_train.astype(np.int64)
-    y_test = y_test.astype(np.int64)
-    return X_train, X_test, y_train, y_test
-
-
-def build_model(input_shape: tuple[int, int] = (30, 9), num_classes: int = 8):
-    """Build a DeepConvLSTM model for activity recognition tasks."""
+def build_model(
+    input_shape: tuple[int, int] = (WINDOW_SIZE, NUM_FEATURES),
+    num_classes: int = 8,
+):
+    """Build the 11-feature DeepConvLSTM Activity model."""
     if tf is None or keras is None or layers is None:
         raise ModuleNotFoundError(
-            "TensorFlow is required to build and train the DeepConvLSTM model. "
-            "Install TensorFlow in the environment before running this script."
+            "TensorFlow is required to build and train the DeepConvLSTM model."
+        )
+
+    if input_shape != (WINDOW_SIZE, NUM_FEATURES):
+        raise ValueError(
+            f"Activity model must use input shape "
+            f"({WINDOW_SIZE}, {NUM_FEATURES}), got {input_shape}"
         )
 
     model = keras.Sequential(
         [
             layers.Input(shape=input_shape),
-            layers.Conv1D(filters=32, kernel_size=3, padding="same", activation="relu"),
+
+            layers.Conv1D(
+                filters=32,
+                kernel_size=3,
+                padding="same",
+                activation="relu",
+            ),
             layers.BatchNormalization(),
             layers.MaxPooling1D(pool_size=2),
             layers.Dropout(0.2),
-            layers.Conv1D(filters=64, kernel_size=3, padding="same", activation="relu"),
+
+            layers.Conv1D(
+                filters=64,
+                kernel_size=3,
+                padding="same",
+                activation="relu",
+            ),
             layers.BatchNormalization(),
             layers.MaxPooling1D(pool_size=2),
             layers.Dropout(0.25),
+
             layers.LSTM(64, return_sequences=True),
             layers.Dropout(0.3),
+
             layers.LSTM(32),
+
             layers.Dense(64, activation="relu"),
             layers.Dropout(0.3),
+
             layers.Dense(num_classes, activation="softmax"),
         ]
     )
@@ -238,11 +274,20 @@ def build_model(input_shape: tuple[int, int] = (30, 9), num_classes: int = 8):
         loss="sparse_categorical_crossentropy",
         metrics=["accuracy"],
     )
+
     return model
 
 
-def train_model(model, X_train: np.ndarray, y_train: np.ndarray):
-    """Train the model and return the fitted model, history, and validation split."""
+# ---------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------
+
+def train_model(
+    model,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+):
+    """Train the model and return the training history."""
     if len(np.unique(y_train)) > 1:
         X_train_split, X_val, y_train_split, y_val = train_test_split(
             X_train,
@@ -275,75 +320,208 @@ def train_model(model, X_train: np.ndarray, y_train: np.ndarray):
         callbacks=[early_stopping],
     )
 
-    return model, history, X_val, y_val
+    return model, history
 
 
-def save_history(history, output_path: Path) -> None:
-    """Save the model training history to disk for later visualization."""
+def save_history(
+    history,
+    output_path: Path,
+) -> None:
+    """Save training history as JSON."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
     with output_path.open("w", encoding="utf-8") as file:
         json.dump(history.history, file, indent=2)
 
 
-def evaluate_model(model, X_test: np.ndarray, y_test: np.ndarray) -> tuple[float, float, str, np.ndarray]:
-    """Evaluate the trained model on the test set and return metrics."""
-    test_loss, test_accuracy = model.evaluate(X_test, y_test, verbose=0)
-    predictions = model.predict(X_test, verbose=0)
+# ---------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------
+
+def evaluate_model(
+    model,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+) -> tuple[float, float, str, np.ndarray]:
+    """Evaluate the trained Activity model."""
+    validate_feature_contract(X_test)
+
+    test_loss, test_accuracy = model.evaluate(
+        X_test,
+        y_test,
+        verbose=0,
+    )
+
+    predictions = model.predict(
+        X_test,
+        verbose=0,
+    )
+
     predicted_labels = predictions.argmax(axis=1)
 
-    unique_labels = np.unique(np.concatenate([y_test, predicted_labels]))
-    if classification_report is not None:
-        report = classification_report(y_test, predicted_labels, labels=unique_labels, zero_division=0)
-    else:
-        report = "Classification report unavailable because scikit-learn is not installed."
+    unique_labels = np.unique(
+        np.concatenate([y_test, predicted_labels])
+    )
 
-    if confusion_matrix is not None:
-        conf_matrix = confusion_matrix(y_test, predicted_labels, labels=unique_labels)
-    else:
-        conf_matrix = np.zeros((len(unique_labels), len(unique_labels)), dtype=np.int64)
-        for true_label, pred_label in zip(y_test, predicted_labels):
-            conf_matrix[unique_labels.tolist().index(true_label), unique_labels.tolist().index(pred_label)] += 1
+    report = classification_report(
+        y_test,
+        predicted_labels,
+        labels=unique_labels,
+        zero_division=0,
+    )
 
-    return float(test_loss), float(test_accuracy), report, conf_matrix
+    conf_matrix = confusion_matrix(
+        y_test,
+        predicted_labels,
+        labels=unique_labels,
+    )
 
+    return (
+        float(test_loss),
+        float(test_accuracy),
+        report,
+        conf_matrix,
+    )
+
+
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
 
 def main() -> None:
-    """Prepare sliding-window data, train the DeepConvLSTM model, and evaluate it."""
+    """Prepare data, train the 11-feature Activity model, and evaluate it."""
+
+    print("=" * 80)
+    print("SILAMBU ACTIVITY MODEL")
+    print("=" * 80)
+    print(f"Window size : {WINDOW_SIZE}")
+    print(f"Features    : {NUM_FEATURES}")
+    print("Feature list:")
+    for index, feature in enumerate(FEATURE_COLUMNS, start=1):
+        print(f"  {index:2d}. {feature}")
+
+    # 1. Load data
     df = load_processed_dataset(PROCESSED_DATA_PATH)
     validate_columns(df)
 
-    X, y_raw = create_time_series_windows(df, FEATURE_COLUMNS, TARGET_COLUMN, WINDOW_SIZE)
+    print(f"\nLoaded dataset: {df.shape}")
+    print(f"Using {NUM_FEATURES} Activity features.")
+
+    # 2. Create sliding windows
+    X, y_raw = create_time_series_windows(
+        df,
+        FEATURE_COLUMNS,
+        TARGET_COLUMN,
+        WINDOW_SIZE,
+    )
+
+    print(f"\nWindowed data shape: {X.shape}")
+
+    # 3. Encode labels
     y, label_encoder = encode_activity_labels(y_raw)
 
+    print(f"Activity classes: {list(label_encoder.classes_)}")
+
+    # 4. Split
     X_train, X_test, y_train, y_test = split_sequences(X, y)
 
+    print(f"\nX_train: {X_train.shape}")
+    print(f"X_test : {X_test.shape}")
+    print(f"y_train: {y_train.shape}")
+    print(f"y_test : {y_test.shape}")
+
+    # 5. Save prepared arrays
     save_numpy_array(X_train, OUTPUT_DIR / "X_train.npy")
     save_numpy_array(X_test, OUTPUT_DIR / "X_test.npy")
     save_numpy_array(y_train, OUTPUT_DIR / "y_train.npy")
     save_numpy_array(y_test, OUTPUT_DIR / "y_test.npy")
-    save_label_encoder(label_encoder, MODEL_DIR / "activity_label_encoder.pkl")
 
-    print_activity_summary(X, y, X_train, X_test, y_train, y_test, label_encoder)
+    # 6. Save label encoder
+    save_label_encoder(
+        label_encoder,
+        MODEL_DIR / "activity_label_encoder.pkl",
+    )
 
-    X_train_loaded, X_test_loaded, y_train_loaded, y_test_loaded = load_data()
-    model = build_model(input_shape=(30, 9), num_classes=len(label_encoder.classes_))
+    # 7. Build model with 30 x 11 input
+    model = build_model(
+        input_shape=(WINDOW_SIZE, NUM_FEATURES),
+        num_classes=len(label_encoder.classes_),
+    )
+
+    print("\nModel input shape:", model.input_shape)
     model.summary()
-    trained_model, history, _, _ = train_model(model, X_train_loaded, y_train_loaded)
 
+    # 8. Train
+    trained_model, history = train_model(
+        model,
+        X_train,
+        y_train,
+    )
+
+    # 9. Save model
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    trained_model.save(MODEL_DIR / "activity_model.keras")
-    save_history(history, OUTPUT_DIR / "activity_training_history.json")
 
-    test_loss, test_accuracy, report, conf_matrix = evaluate_model(trained_model, X_test_loaded, y_test_loaded)
+    model_path = MODEL_DIR / "activity_model.keras"
+    trained_model.save(model_path)
 
-    print("\nTraining accuracy:", history.history["accuracy"][-1])
-    print("Validation accuracy:", history.history["val_accuracy"][-1])
-    print("Test accuracy:", test_accuracy)
-    print("Test loss:", test_loss)
-    print("\nClassification report:\n", report)
-    print("\nConfusion matrix:\n", conf_matrix)
-    print(f"\nSaved trained model to: {MODEL_DIR / 'activity_model.keras'}")
-    print(f"Saved training history to: {OUTPUT_DIR / 'activity_training_history.json'}")
+    # 10. Save history
+    save_history(
+        history,
+        OUTPUT_DIR / "activity_training_history.json",
+    )
+
+    # 11. Evaluate
+    test_loss, test_accuracy, report, conf_matrix = evaluate_model(
+        trained_model,
+        X_test,
+        y_test,
+    )
+
+    print("\n" + "=" * 80)
+    print("FINAL ACTIVITY MODEL RESULTS")
+    print("=" * 80)
+
+    print(
+        "Training accuracy:",
+        history.history["accuracy"][-1],
+    )
+
+    print(
+        "Validation accuracy:",
+        history.history["val_accuracy"][-1],
+    )
+
+    print(
+        "Test accuracy:",
+        test_accuracy,
+    )
+
+    print(
+        "Test loss:",
+        test_loss,
+    )
+
+    print("\nClassification report:\n")
+    print(report)
+
+    print("Confusion matrix:\n")
+    print(conf_matrix)
+
+    print("\nSaved model:")
+    print(model_path)
+
+    print("\nActivity model contract:")
+    print(f"  Window: {WINDOW_SIZE}")
+    print(f"  Features: {NUM_FEATURES}")
+    print(f"  Input shape: {trained_model.input_shape}")
+
+    if trained_model.input_shape != (None, WINDOW_SIZE, NUM_FEATURES):
+        raise RuntimeError(
+            "Saved Activity model does not have the expected "
+            f"(None, {WINDOW_SIZE}, {NUM_FEATURES}) input shape."
+        )
+
+    print("\nActivity model successfully trained with 11 features.")
 
 
 if __name__ == "__main__":
